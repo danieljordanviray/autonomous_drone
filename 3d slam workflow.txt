@@ -1,0 +1,52 @@
+-- GAZEBO
+gz sim -v4 -r iris_sar_field.sdf
+gz sim -v4 -r -s iris_sar_field.sdf
+
+-- SITL
+cd ~/ardupilot
+sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON --console --out=udp:127.0.0.1:14551
+set streamrate 50
+
+-- MAVROS: SITL --> ROS2
+ros2 run mavros mavros_node --ros-args -p fcu_url:=udp://127.0.0.1:14550@14555 -p use_sim_time:=true
+
+-- BRIDGES: GAZEBO --> ROS2
+ros2 run ros_gz_bridge parameter_bridge \
+  /camera/color@sensor_msgs/msg/Image[gz.msgs.Image \
+  /camera/depth@sensor_msgs/msg/Image[gz.msgs.Image \
+  /camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo \
+  /camera/depth/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked \
+  /clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock
+
+-- TF TREE: GAZEBO & SITL --> ROS2
+python3 ~/mavros_tf_bridge.py --ros-args -p use_sim_time:=true
+
+-- SLAM
+
+delete /.ros/rtabmap.db
+
+ros2 run rtabmap_slam rtabmap   --ros-args   -p subscribe_depth:=true   -p frame_id:=base_link   -p odom_frame_id:=odom   -p approx_sync:=true   -p approx_sync_max_interval:=0.1   -p use_sim_time:=true   -r rgb/image:=/camera/color   -r depth/image:=/camera/depth   -r rgb/camera_info:=/camera/camera_info
+
+-- RVIZ
+rviz2 --ros-args -p use_sim_time:=true
+
+-- WAYPOINT NAVIGATION
+python3 ~/goal_navigator.py --ros-args -p use_sim_time:=true
+
+-- OBSTACLE AVOIDANCE
+python3 ~/obstacle_avoidance.py --ros-args -p use_sim_time:=true
+
+
+-- ROBOT CONTROL
+python3 keyboard_fly.py
+
+mode guided
+arm throttle
+takeoff 1
+position 5 0 0     # move 5m north
+position 0 5 0     # move 5m east
+position -5 0 0    # move 5m south
+
+respawn drone
+gz service -s /world/iris_sar_field/set_pose --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req "name: 'iris_sar', position: {x: 0, y: 0, z: 0.195}, orientation: {x: 0, y: 0, z: 0.7071, w: 0.7071}"
+

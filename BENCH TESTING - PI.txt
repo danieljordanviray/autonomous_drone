@@ -1,0 +1,36 @@
+BENCH TESTING - PI
+
+--------------------------------------------------------------------
+USERNAME / PASSWORD
+--------------------------------------------------------------------
+Name: virayd
+Password: drone-pi
+
+--------------------------------------------------------------------
+HOTSPOT ON/OFF
+--------------------------------------------------------------------
+sudo nmcli connection modify 'WF1' autoconnect no
+sudo nmcli connection modify Hotspot autoconnect yes
+sudo reboot
+
+sudo nmcli connection modify Hotspot autoconnect no
+sudo nmcli connection modify 'WF1' autoconnect yes
+sudo reboot
+
+--------------------------------------------------------------------
+SSH
+--------------------------------------------------------------------
+ssh virayd@raspberrypi-virayd.local
+ssh virayd@10.42.0.1
+
+--------------------------------------------------------------------
+SSH - GUI
+--------------------------------------------------------------------
+vncserver-virtual
+10.42.0.1:5900
+192.168.4.51:5900
+
+--------------------------------------------------------------------
+VIDEO FILE TRANSFER
+--------------------------------------------------------------------
+scp virayd@192.168.4.51:/home/virayd/Desktop/flight_recording_2.mp4 "C:\Users\djvir\OneDrive\AI Projects\01-27-26 Autonomous Drone\flight_recording_2.mp4"
