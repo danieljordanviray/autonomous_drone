@@ -1,0 +1,351 @@
+<?xml version='1.0'?>
+<sdf version="1.9">
+  <!--
+    F450 SAR Drone with Intel RealSense D455
+    
+    Gazebo side (this file):
+      iris_with_standoffs::base_link -> camera_link  (fixed joint, physics only)
+      Camera publishes images in camera_link's frame
+    
+    ROS TF side (NOT this file, handled by launch file):
+      map -> odom                    : RTAB-Map (loop closure corrections)
+      odom -> base_link              : MAVROS (drone pose from EKF)
+      base_link -> camera_link       : Static TF (mount position + 15deg pitch)
+      camera_link -> camera_optical  : Static TF (ROS body -> camera optical rotation)
+    
+    The camera_optical frame applies the standard rotation:
+      rpy = (-pi/2, 0, -pi/2)
+    which converts ROS convention (X-forward, Y-left, Z-up) to
+    camera optical convention (X-right, Y-down, Z-forward).
+    
+    D455 Real Hardware Specs:
+      Dimensions: 124mm x 29mm x 26mm
+      Weight: 110g
+      Depth FOV: 87 x 58 deg (1.518 x 1.012 rad)
+      RGB FOV: 90 x 65 deg (1.571 x 1.134 rad)
+      Stereo baseline: 95mm
+      Depth range: 0.6m - 6m
+      IMU: Bosch BMI055
+  -->
+  <model name="f450_sar">
+    
+    <!-- ============================================================ -->
+    <!-- FLIGHT PLATFORM: Standard Iris quadcopter                    -->
+    <!-- ============================================================ -->
+    <include>
+      <uri>model://iris_with_standoffs</uri>
+    </include>
+
+    <!-- ============================================================ -->
+    <!-- INTEL REALSENSE D455                                          -->
+    <!--                                                               -->
+    <!-- Mount: front-bottom of drone, pitched 15 deg down             -->
+    <!--   x=0.1m forward, z=-0.05m below center                      -->
+    <!--                                                               -->
+    <!-- Gazebo publishes images with frame_id derived from            -->
+    <!-- model_name/link_name/sensor_name by the ros_gz_bridge.        -->
+    <!-- The ROS TF tree maps these to camera_optical for correct      -->
+    <!-- projection.                                                   -->
+    <!-- ============================================================ -->
+    <link name="camera_link">
+      <pose degrees="true">0.1 0 -0.05 0 15 0</pose>
+      
+      <inertial>
+        <mass>0.110</mass>
+        <inertia>
+          <ixx>0.00004</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.00004</iyy>
+          <iyz>0</iyz>
+          <izz>0.00002</izz>
+        </inertia>
+      </inertial>
+      
+      <!-- D455 physical body: 124mm x 29mm x 26mm -->
+      <visual name="d455_visual">
+        <geometry>
+          <box>
+            <size>0.124 0.029 0.026</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.2 0.2 0.2 1</ambient>
+          <diffuse>0.3 0.3 0.3 1</diffuse>
+        </material>
+      </visual>
+
+      <!-- ======================================================== -->
+      <!-- RGB Camera (center sensor on D455)                        -->
+      <!-- FOV: 90 deg horizontal (1.5708 rad)                      -->
+      <!-- Resolution: 320x240 (reduced for sim performance)        -->
+      <!-- Real D455 supports up to 1280x800                        -->
+      <!-- ======================================================== -->
+      <sensor name="d455_color" type="camera">
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>true</visualize>
+        <topic>camera/color</topic>
+        <camera>
+          <horizontal_fov>1.5708</horizontal_fov>
+          <image>
+            <width>320</width>
+            <height>240</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.3</near>
+            <far>100</far>
+          </clip>
+        </camera>
+      </sensor>
+
+      <!-- ======================================================== -->
+      <!-- Depth Camera (stereo pair on D455)                        -->
+      <!-- FOV: 87 deg horizontal (1.518 rad)                       -->
+      <!-- Range: 0.6m - 6m                                          -->
+      <!-- Resolution: 320x240 (reduced for sim performance)        -->
+      <!-- Real D455 supports up to 1280x720                        -->
+      <!-- ======================================================== -->
+      <sensor name="d455_depth" type="depth_camera">
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>camera/depth</topic>
+        <camera>
+          <horizontal_fov>1.518</horizontal_fov>
+          <image>
+            <width>320</width>
+            <height>240</height>
+            <format>R_FLOAT32</format>
+          </image>
+          <clip>
+            <near>0.6</near>
+            <far>6.0</far>
+          </clip>
+        </camera>
+      </sensor>
+
+      <!-- ======================================================== -->
+      <!-- IMU (Bosch BMI055 on D455)                                -->
+      <!-- ======================================================== -->
+      <sensor name="d455_imu" type="imu">
+        <always_on>1</always_on>
+        <update_rate>200</update_rate>
+        <topic>camera/imu</topic>
+        <imu>
+          <angular_velocity>
+            <x><noise type="gaussian"><mean>0</mean><stddev>0.009</stddev></noise></x>
+            <y><noise type="gaussian"><mean>0</mean><stddev>0.009</stddev></noise></y>
+            <z><noise type="gaussian"><mean>0</mean><stddev>0.009</stddev></noise></z>
+          </angular_velocity>
+          <linear_acceleration>
+            <x><noise type="gaussian"><mean>0</mean><stddev>0.1</stddev></noise></x>
+            <y><noise type="gaussian"><mean>0</mean><stddev>0.1</stddev></noise></y>
+            <z><noise type="gaussian"><mean>0</mean><stddev>0.1</stddev></noise></z>
+          </linear_acceleration>
+        </imu>
+      </sensor>
+    </link>
+
+    <!-- Fixed joint: attach camera to drone body -->
+    <joint name="camera_joint" type="fixed">
+      <parent>iris_with_standoffs::base_link</parent>
+      <child>camera_link</child>
+    </joint>
+
+    <!-- ============================================================ -->
+    <!-- PLUGINS: Joint State Publisher                                -->
+    <!-- ============================================================ -->
+    <plugin filename="gz-sim-joint-state-publisher-system"
+      name="gz::sim::systems::JointStatePublisher">
+    </plugin>
+
+    <!-- ============================================================ -->
+    <!-- PLUGINS: Lift-Drag for all 4 rotors (2 blades each = 8)      -->
+    <!-- ============================================================ -->
+    <!-- Rotor 0 blade 1 -->
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>0.084 0 0</cp><forward>0 1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_0</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>-0.084 0 0</cp><forward>0 -1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_0</link_name>
+    </plugin>
+    <!-- Rotor 1 -->
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>0.084 0 0</cp><forward>0 1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_1</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>-0.084 0 0</cp><forward>0 -1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_1</link_name>
+    </plugin>
+    <!-- Rotor 2 -->
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>0.084 0 0</cp><forward>0 -1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_2</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>-0.084 0 0</cp><forward>0 1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_2</link_name>
+    </plugin>
+    <!-- Rotor 3 -->
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>0.084 0 0</cp><forward>0 -1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_3</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system"
+        name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0><alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla><cda>0.10</cda><cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall><cda_stall>0.0</cda_stall><cma_stall>0.0</cma_stall>
+      <area>0.002</area><air_density>1.2041</air_density>
+      <cp>-0.084 0 0</cp><forward>0 1 0</forward><upward>0 0 1</upward>
+      <link_name>iris_with_standoffs::rotor_3</link_name>
+    </plugin>
+
+    <!-- ============================================================ -->
+    <!-- PLUGINS: Apply Joint Force (motor control)                   -->
+    <!-- ============================================================ -->
+    <plugin filename="gz-sim-apply-joint-force-system"
+      name="gz::sim::systems::ApplyJointForce">
+      <joint_name>iris_with_standoffs::rotor_0_joint</joint_name>
+    </plugin>
+    <plugin filename="gz-sim-apply-joint-force-system"
+      name="gz::sim::systems::ApplyJointForce">
+      <joint_name>iris_with_standoffs::rotor_1_joint</joint_name>
+    </plugin>
+    <plugin filename="gz-sim-apply-joint-force-system"
+      name="gz::sim::systems::ApplyJointForce">
+      <joint_name>iris_with_standoffs::rotor_2_joint</joint_name>
+    </plugin>
+    <plugin filename="gz-sim-apply-joint-force-system"
+      name="gz::sim::systems::ApplyJointForce">
+      <joint_name>iris_with_standoffs::rotor_3_joint</joint_name>
+    </plugin>
+
+    <!-- ============================================================ -->
+    <!-- PLUGIN: ArduPilot SITL Connection                            -->
+    <!-- ============================================================ -->
+    <plugin name="ArduPilotPlugin"
+      filename="ArduPilotPlugin">
+      <fdm_addr>127.0.0.1</fdm_addr>
+      <fdm_port_in>9002</fdm_port_in>
+      <connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>
+      <lock_step>1</lock_step>
+      <no_time_sync>1</no_time_sync>
+
+      <modelXYZToAirplaneXForwardZDown degrees="true">0 0 0 180 0 0</modelXYZToAirplaneXForwardZDown>
+      <gazeboXYZToNED degrees="true">0 0 0 180 0 90</gazeboXYZToNED>
+
+      <imuName>iris_with_standoffs::imu_link::imu_sensor</imuName>
+
+      <control channel="0">
+        <jointName>iris_with_standoffs::rotor_0_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>838</multiplier>
+        <offset>0</offset>
+        <servo_min>1100</servo_min>
+        <servo_max>1900</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <controlVelocitySlowdownSim>1</controlVelocitySlowdownSim>
+      </control>
+      <control channel="1">
+        <jointName>iris_with_standoffs::rotor_1_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>838</multiplier>
+        <offset>0</offset>
+        <servo_min>1100</servo_min>
+        <servo_max>1900</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <controlVelocitySlowdownSim>1</controlVelocitySlowdownSim>
+      </control>
+      <control channel="2">
+        <jointName>iris_with_standoffs::rotor_2_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>-838</multiplier>
+        <offset>0</offset>
+        <servo_min>1100</servo_min>
+        <servo_max>1900</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <controlVelocitySlowdownSim>1</controlVelocitySlowdownSim>
+      </control>
+      <control channel="3">
+        <jointName>iris_with_standoffs::rotor_3_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>-838</multiplier>
+        <offset>0</offset>
+        <servo_min>1100</servo_min>
+        <servo_max>1900</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <controlVelocitySlowdownSim>1</controlVelocitySlowdownSim>
+      </control>
+    </plugin>
+
+  </model>
+</sdf>
