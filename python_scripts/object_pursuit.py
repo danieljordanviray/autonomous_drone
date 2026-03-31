@@ -15,51 +15,66 @@ if not hasattr(collections, 'MutableSequence'):
 
 import time
 import math
+import threading
 import os
 os.environ["MAVLINK20"] = "1"
 from dronekit import connect, VehicleMode
 from pymavlink import mavutil
 
-# for camera / object detection
+# Camera / object detection
 import cv2
 import numpy as np
-from gz.transport13 import Node
-from gz.msgs10.image_pb2 import Image
+from picamera2 import Picamera2
 
 # ============================================================================
-# ── CAMERA SUBSCRIBER ──
+# ── CAMERA ──
 # ============================================================================
+
+cam = Picamera2()
+cam.configure(cam.create_preview_configuration(main={'size': (640, 480), 'format': 'RGB888'}))
+cam.start()
+time.sleep(1)  # let camera warm up
+print("[✓] Camera started.")
 
 latest_frame = None
 
-def on_camera_image(msg):
-    """Callback — converts Gazebo camera frame to OpenCV format."""
-    global latest_frame
-    img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
-    latest_frame = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+# Video recorder
+VIDEO_FILENAME = 'flight_recording.mp4'
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+video_out = cv2.VideoWriter(VIDEO_FILENAME, fourcc, 15.0, (640, 480))
+print(f"[*] Recording to {VIDEO_FILENAME}")
 
-gz_node = Node()
-CAMERA_TOPIC = "/front_camera"
-gz_node.subscribe(Image, CAMERA_TOPIC, on_camera_image)
-print(f"[*] Subscribed to camera: {CAMERA_TOPIC}")
+def camera_loop():
+    """Background thread: continuously grab frames and record."""
+    global latest_frame
+    while True:
+        frame = cam.capture_array()
+        latest_frame = frame
+        video_out.write(frame)
+
+thread = threading.Thread(target=camera_loop, daemon=True)
+thread.start()
+print("[✓] Camera thread running.\n")
 
 # ============================================================================
 # ── CONFIG ──
 # ============================================================================
 
-CONNECTION_STRING = '127.0.0.1:14550'  # ArduPilot SITL
+CONNECTION_STRING = '/dev/ttyAMA0'  # RPi5 via TELEM2
+BAUD_RATE = 921600                  # RPi5 via TELEM2
+
 TARGET_ALTITUDE = 1.5    # meters
 HOVER_DURATION = 3       # seconds
 TAKEOFF_TIMEOUT = 60     # seconds
 
-# Camera: 120° horizontal FOV (2.094 rad), 640x480, pitched 45° down
-CAMERA_HFOV_DEG = 120.0           # horizontal field of view in degrees
-CAMERA_HALF_FOV = CAMERA_HFOV_DEG / 2.0  # 60° — max angle from center to edge
+# Camera: 120° horizontal FOV, 640x480
+CAMERA_HFOV_DEG = 120.0
+CAMERA_HALF_FOV = CAMERA_HFOV_DEG / 2.0  # 60°
 
 # Pursuit
-APPROACH_SPEED = 0.5      # m/s — slow and controlled
+APPROACH_SPEED = 0.5      # m/s
 LOST_THRESHOLD = 10.0     # seconds — re-scan if target lost this long
-LAND_AREA_THRESHOLD = 3000  # pixel area — target is "close" when this big
+LAND_AREA_THRESHOLD = 2000  # pixel area — target is "close" when this big
 
 # ============================================================================
 # ── FUNCTIONS ──
@@ -141,18 +156,16 @@ def condition_yaw(vehicle, heading, speed_deg_s=0, direction=1, relative=False):
         param2 = yaw speed (deg/s, 0 = default speed)
         param3 = direction: 1 = CW, -1 = CCW
         param4 = 0 = absolute heading, 1 = relative to current
-
-    For 90° CW relative: condition_yaw(vehicle, 90, direction=1, relative=True)
     """
     msg = vehicle.message_factory.command_long_encode(
-        0, 0,                                        # target system, component
-        mavutil.mavlink.MAV_CMD_CONDITION_YAW,       # command
-        0,                                            # confirmation
-        heading,                                      # param1: degrees
-        speed_deg_s,                                  # param2: deg/s (0 = default)
-        direction,                                    # param3: 1=CW, -1=CCW
-        1 if relative else 0,                         # param4: relative or absolute
-        0, 0, 0                                       # params 5-7 unused
+        0, 0,
+        mavutil.mavlink.MAV_CMD_CONDITION_YAW,
+        0,
+        heading,
+        speed_deg_s,
+        direction,
+        1 if relative else 0,
+        0, 0, 0
     )
     vehicle.send_mavlink(msg)
     vehicle.flush()
@@ -175,18 +188,18 @@ def print_telemetry(vehicle):
     print(f"  System Status:   {vehicle.system_status.state}")
     print("═════════════════════════════════════════\n")
 
+
 def detect_red(frame):
     """
-    Detect a red circular object in the frame.
-
-    Returns:
-        dict with cx, cy, area if found (frame is annotated with bounding box)
-        None if not found
+    Detect a red object in the frame using real-world Pi camera thresholds.
+    Draws bounding box on frame if found.
+    Returns dict with cx, cy, area if found, or None.
     """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    mask1 = cv2.inRange(hsv, np.array([0, 100, 100]), np.array([10, 255, 255]))
-    mask2 = cv2.inRange(hsv, np.array([170, 100, 100]), np.array([180, 255, 255]))
+    # Higher saturation (150) filters out skin tones
+    mask1 = cv2.inRange(hsv, np.array([0, 150, 100]), np.array([10, 255, 255]))
+    mask2 = cv2.inRange(hsv, np.array([170, 150, 100]), np.array([180, 255, 255]))
     mask = mask1 | mask2
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -196,30 +209,31 @@ def detect_red(frame):
 
     largest = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest)
-    if area < 50:
+    if area < 200:
         return None
 
-    # Shape filter: ball's bounding box is roughly square
+    # Aspect ratio filter
     x, y, w, h = cv2.boundingRect(largest)
     aspect_ratio = float(w) / h if h > 0 else 0
-    if aspect_ratio < 0.5 or aspect_ratio > 2.0:
+    if aspect_ratio < 0.3 or aspect_ratio > 3.0:
         return None
 
-    # Fill ratio filter: at least 50% of bounding box must be red
+    # Fill ratio — at least 30% of bounding box must be red
     box_area = w * h
     red_in_box = cv2.countNonZero(mask[y:y+h, x:x+w])
     fill_ratio = red_in_box / box_area if box_area > 0 else 0
-    if fill_ratio < 0.5:
+    if fill_ratio < 0.3:
         return None
 
     # Draw bounding box, center dot, and label
     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 1)
     cx, cy = x + w // 2, y + h // 2
     cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
-    cv2.putText(frame, "RESCUE SUBJECT", (x, y - 10),
+    cv2.putText(frame, f"RESCUE SUBJECT area:{int(area)}", (x, y - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
     return {"cx": cx, "cy": cy, "area": area}
+
 
 def show_camera():
     """Display the latest camera frame in an OpenCV window."""
@@ -227,12 +241,11 @@ def show_camera():
         cv2.imshow("Drone Camera", latest_frame)
         cv2.waitKey(1)
 
+
 def scan_for_target(vehicle):
     """
     Rotate 300° CW scanning for the red target.
-
-    Returns:
-        heading (int) where target was detected, or None if not found.
+    Returns heading (int) where target was detected, or None if not found.
     """
     start_heading = vehicle.heading
     rotate_by_deg = 300
@@ -246,7 +259,6 @@ def scan_for_target(vehicle):
         current = vehicle.heading
         altitude = vehicle.location.global_relative_frame.alt
 
-        # ── DETECTION ──
         if latest_frame is not None:
             frame = latest_frame.copy()
             result = detect_red(frame)
@@ -275,6 +287,7 @@ def scan_for_target(vehicle):
     print(f"[!] Scan timed out.\n")
     return None
 
+
 # ============================================================================
 # ── MAIN ──
 # ============================================================================
@@ -282,9 +295,8 @@ def scan_for_target(vehicle):
 def main():
 
     # ── CONNECT ──
-    print(f"[*] Connecting to Pixhawk on {CONNECTION_STRING}")
-    vehicle = connect(CONNECTION_STRING, wait_ready=False)
-    time.sleep(5)
+    print(f"[*] Connecting to Pixhawk on {CONNECTION_STRING} at {BAUD_RATE} baud...")
+    vehicle = connect(CONNECTION_STRING, baud=BAUD_RATE, wait_ready=True)
     print("[✓] Connected!\n")
 
     # ── INITIAL TELEMETRY ──
@@ -358,9 +370,6 @@ def main():
     # SCAN → PURSUE → LAND
     # ══════════════════════════════════════════════════════════════════════
 
-    # Scan for target. If lost during pursuit, re-scan.
-    # Loop continues until we land on target or scan finds nothing.
-
     detection_heading = scan_for_target(vehicle)
 
     while detection_heading is not None:
@@ -368,7 +377,7 @@ def main():
         # Cancel any ongoing rotation by commanding current heading
         condition_yaw(vehicle, vehicle.heading, relative=False)
         send_velocity(vehicle, 0, 0, 0)
-        time.sleep(1)  # let the FC settle
+        time.sleep(1)
 
         # ──────────────────────────────────────────────────────────────
         # PURSUE RESCUE SUBJECT
@@ -401,32 +410,24 @@ def main():
                 if last_seen_area > LAND_AREA_THRESHOLD:
                     print(f"  [*] Close to target (area: {last_seen_area}). Landing.")
                     send_velocity(vehicle, 0, 0, 0)
-                    detection_heading = None  # exit outer loop → land
+                    detection_heading = None
                     break
 
                 cx = result["cx"]
                 frame_width = frame.shape[1]
                 frame_center = frame_width // 2
 
-                # How far off-center is the target? Normalize to -1.0 to 1.0.
-                # Negative = target is left of center, positive = right.
                 offset = (cx - frame_center) / frame_center
-
-                # Convert pixel offset to angular correction.
-                # With 120° FOV, full offset (edge of frame) = 60° correction.
                 correction_deg = offset * CAMERA_HALF_FOV
 
-                # Proportional speed: slow down as we get closer.
-                # area_ratio goes from 0 (far) to 1 (at landing threshold).
-                # Speed goes from 100% (far) down to 20% (close).
+                # Proportional speed: slow down as we get closer
                 area_ratio = min(result["area"] / LAND_AREA_THRESHOLD, 1.0)
                 speed = APPROACH_SPEED * (1.0 - 0.8 * area_ratio)
 
-                # Apply correction to current heading, convert to NED velocity.
                 bearing = current_heading + correction_deg
                 bearing_rad = math.radians(bearing)
-                vx = speed * math.cos(bearing_rad)  # North
-                vy = speed * math.sin(bearing_rad)  # East
+                vx = speed * math.cos(bearing_rad)
+                vy = speed * math.sin(bearing_rad)
 
                 send_velocity(vehicle, vx, vy, 0)
                 print(f"  Pursuing... Heading: {current_heading}°  "
@@ -441,16 +442,12 @@ def main():
 
                 elapsed_lost = time.time() - lost_time
 
-                # Case 1: Target was big (close) right before vanishing.
-                # We're on top of it — land.
                 if last_seen_area > LAND_AREA_THRESHOLD:
                     print(f"  [*] Target below drone (last area: {last_seen_area}). Landing.")
                     send_velocity(vehicle, 0, 0, 0)
-                    detection_heading = None  # exit outer loop → land
+                    detection_heading = None
                     break
 
-                # Case 2: Target was small and lost for too long.
-                # Stop and re-scan.
                 if elapsed_lost > LOST_THRESHOLD:
                     print(f"  [!] Lost target for {LOST_THRESHOLD}s. Re-scanning...")
                     send_velocity(vehicle, 0, 0, 0)
@@ -458,11 +455,10 @@ def main():
                     detection_heading = scan_for_target(vehicle)
                     break
 
-                # Case 3: Brief loss — hold course, target might reappear.
                 print(f"  Searching... target lost ({elapsed_lost:.1f}s)  "
                       f"Alt: {altitude:.2f}m")
 
-            time.sleep(0.2)  # faster loop during pursuit
+            time.sleep(0.2)
 
     # ══════════════════════════════════════════════════════════════════════
     # LAND
@@ -479,10 +475,12 @@ def main():
 
     print("[✓] Landed and disarmed.\n")
 
-    # ── CLOSE CAMERA ──
-    cv2.destroyAllWindows()
-
     # ── CLEANUP ──
+    cv2.destroyAllWindows()
+    video_out.release()
+    cam.stop()
+    print(f"[✓] Video saved to {VIDEO_FILENAME}")
+
     print("[*] Closing connection...")
     vehicle.close()
 
