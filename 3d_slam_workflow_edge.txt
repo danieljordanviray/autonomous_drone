@@ -1,0 +1,29 @@
+-- MAVROS (PIXHAWK -> ROS)
+ros2 run mavros mavros_node --ros-args \
+  -p fcu_url:=serial:///dev/ttyAMA0:921600
+
+-- CAMERA
+ros2 launch realsense2_camera rs_launch.py \
+  depth_module.profile:=320x240x6 \
+  rgb_camera.profile:=320x240x6
+
+-- TF TREE
+python3 mavros_TFtree_edge.py
+
+-- CHECK ODOM
+source /opt/ros/jazzy/setup.bash
+ros2 topic hz /mavros/local_position/odom
+
+-- RTAB MAP
+rm -f ~/.ros/rtabmap.db
+ros2 run rtabmap_slam rtabmap --ros-args \
+  -p subscribe_depth:=true \
+  -p frame_id:=camera_link \
+  -p odom_frame_id:=odom \
+  -p approx_sync:=true \
+  -p approx_sync_max_interval:=0.1 \
+  -r rgb/image:=/camera/camera/color/image_raw \
+  -r depth/image:=/camera/camera/depth/image_rect_raw \
+  -r rgb/camera_info:=/camera/camera/color/camera_info
+
+-- RViz2
